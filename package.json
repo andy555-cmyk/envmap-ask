@@ -1,0 +1,9 @@
+{
+  "name": "envmap-ask-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "환경분석맵 현장 질문 답변 프록시 (Gemini). 키는 환경변수에만 둔다.",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
