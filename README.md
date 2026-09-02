@@ -1,5 +1,21 @@
 # 현장 질문 답변 — AI 프록시 (Gemini)
 
+> ⚠ **이 폴더는 원본이 아니다.** 2026-09-02에 별도 저장소로 분리했다.
+> 실제 배포 원본: **`github.com/andy555-cmyk/envmap-ask`** (맥 로컬 `~/dev/envmap-ask`)
+>
+> **왜 분리했나** — 클라우드타입 Node 빌드팩이 **저장소 루트의 package.json** 을 요구한다.
+> `context.git.subpath='chat'` 로도, `install`/`start` 에서 `cd chat` 으로도 빌드가 실패했다(2회 실측).
+> 루트에 package.json 이 있는 별도 저장소로 옮기자 즉시 성공했다.
+>
+> 고칠 일이 있으면 **`~/dev/envmap-ask` 에서 고치고 push** 한다. 이 폴더는 참고용 사본이다.
+
+## 배포 현황 (2026-09-02)
+
+- 서비스 `envmap-ask` (클라우드타입 `@ganpan0/soetae-analysis:main`, node@24, 프리티어 512MB)
+- 주소 **https://port-0-envmap-ask-mrksc1tcf2e7efab.sel3.cloudtype.app**
+- 상태 확인 `curl <주소>/health` → `{"ok":true,"model":"gemini-2.0-flash",...}`
+- ⚠ **환경변수 `GEMINI_API_KEY`·`ASK_PASS` 가 아직 비어 있다.** 대표가 채워야 동작한다
+
 ## 왜 프록시인가
 
 API 키를 HTML 에 넣을 수 없다(프로젝트 절대 규칙).
