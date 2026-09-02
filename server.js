@@ -84,13 +84,11 @@ async function callModel(prompt, model, allowFallback) {
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': KEY },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.1,
-            /* ⚠ 2026-09-02 실측 — Gemini 3.x 는 '사고(thinking)' 토큰이 출력 한도를 먼저 먹는다.
-               500 으로 두었더니 답이 24자에서 잘렸다. 한도를 넉넉히 주고 사고를 끈다. */
-            maxOutputTokens: 2048,
-            thinkingConfig: { thinkingBudget: 0 },
-          },
+          /* ⚠ 2026-09-02 실측 2건
+             ① Gemini 3.x 는 '사고(thinking)' 토큰이 출력 한도를 먼저 먹는다.
+                500 으로 두었더니 답이 24자에서 잘렸다 → 2048 로 올린다.
+             ② thinkingConfig 를 넣었더니 400 INVALID_ARGUMENT 가 났다 → 넣지 않는다. */
+          generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
         }) }
     );
     raw = await r.text();
