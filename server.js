@@ -16,6 +16,11 @@
  */
 const http = require('http');
 
+/* 응답을 못 돌려주고 연결이 끊기면 브라우저에는 "Failed to fetch" 만 보인다.
+   원인을 못 보는 것이 가장 큰 문제라, 무슨 일이 있어도 JSON 으로 답하게 만든다. */
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
+process.on('uncaughtException',  (e) => console.error('[uncaughtException]', e));
+
 const KEY    = process.env.GEMINI_API_KEY || '';
 const PASS   = process.env.ASK_PASS || '';
 const MODEL  = process.env.ASK_MODEL || 'gemini-2.0-flash';
@@ -42,6 +47,7 @@ const SYS = [
 ].join('\n');
 
 function send(res, code, obj) {
+  try {
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': ORIGIN,
@@ -50,6 +56,7 @@ function send(res, code, obj) {
     'Cache-Control': 'no-store',
   });
   res.end(JSON.stringify(obj));
+  } catch (e) { try { res.end(); } catch (_) {} console.error('[send]', e && e.message); }
 }
 
 async function ask(q, cards, region) {
@@ -60,16 +67,26 @@ async function ask(q, cards, region) {
 
   const prompt = `${SYS}\n\n대상 지역: ${region || '(미지정)'}\n\n[근거 카드]\n${ctx || '(없음)'}\n\n[질문]\n${q}`;
 
-  const r = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${KEY}`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 500 },
-      }) }
-  );
-  if (!r.ok) throw new Error('gemini ' + r.status + ' ' + (await r.text()).slice(0, 200));
-  const j = await r.json();
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 25000);
+  let r, raw;
+  try {
+    r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+      { method: 'POST', signal: ac.signal,
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': KEY },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 500 },
+        }) }
+    );
+    raw = await r.text();
+  } catch (e) {
+    throw new Error('upstream 연결 실패: ' + String(e && e.message || e).slice(0, 160));
+  } finally { clearTimeout(timer); }
+
+  if (!r.ok) throw new Error('gemini ' + r.status + ' — ' + raw.replace(/\s+/g, ' ').slice(0, 240));
+  let j; try { j = JSON.parse(raw); } catch (e) { throw new Error('gemini 응답 파싱 실패: ' + raw.slice(0, 200)); }
   const t = j && j.candidates && j.candidates[0] && j.candidates[0].content
             && j.candidates[0].content.parts && j.candidates[0].content.parts[0]
             && j.candidates[0].content.parts[0].text;
@@ -79,7 +96,8 @@ async function ask(q, cards, region) {
 http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   if (req.url === '/health') return send(res, 200, { ok: true, model: MODEL, used, cap: CAP, month });
-  if (req.method !== 'POST' || req.url !== '/ask') return send(res, 404, { error: 'not found' });
+  const isDiag = req.method === 'POST' && req.url === '/diag';
+  if (!isDiag && !(req.method === 'POST' && req.url === '/ask')) return send(res, 404, { error: 'not found' });
 
   if (!KEY)  return send(res, 500, { error: 'GEMINI_API_KEY 미설정' });
   if (!PASS) return send(res, 500, { error: 'ASK_PASS 미설정' });
@@ -97,6 +115,11 @@ http.createServer((req, res) => {
       const q = (p.q || '').trim();
       if (!q) return send(res, 400, { error: '질문이 비었습니다' });
       const cards = Array.isArray(p.cards) ? p.cards.slice(0, 12) : [];
+      if (isDiag) {
+        /* 키·모델이 실제로 동작하는지 확인만 한다. 실패해도 원문을 그대로 돌려준다 */
+        try { const a = await ask('연결 확인', [], ''); return send(res, 200, { diag: 'ok', sample: a.slice(0, 120) }); }
+        catch (e) { return send(res, 200, { diag: 'fail', reason: String(e.message || e).slice(0, 400) }); }
+      }
       used++;
       const answer = await ask(q, cards, p.region);
       send(res, 200, { answer, cards: cards.length, used, cap: CAP });
