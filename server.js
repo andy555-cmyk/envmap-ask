@@ -70,12 +70,16 @@ async function ask(q, cards, region) {
 
   const prompt = `${SYS}\n\n대상 지역: ${region || '(미지정)'}\n\n[근거 카드]\n${ctx || '(없음)'}\n\n[질문]\n${q}`;
 
-  return callModel(prompt, ACTIVE, true);
+  return callModel(prompt, ACTIVE, true, THINK);
 }
 
-async function callModel(prompt, model, allowFallback) {
+/* Gemini 3.x 는 '사고' 때문에 느리다(2026-09-02 실측: 25초 초과).
+   사고수준을 낮춰 보고, 그 옵션을 거부하면 옵션 없이 다시 던진다. */
+let THINK = 'low';        // 'low' → 거부되면 null 로 내려간다
+
+async function callModel(prompt, model, allowFallback, think) {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 25000);
+  const timer = setTimeout(() => ac.abort(), 50000);
   let r, raw;
   try {
     r = await fetch(
@@ -88,7 +92,10 @@ async function callModel(prompt, model, allowFallback) {
              ① Gemini 3.x 는 '사고(thinking)' 토큰이 출력 한도를 먼저 먹는다.
                 500 으로 두었더니 답이 24자에서 잘렸다 → 2048 로 올린다.
              ② thinkingConfig 를 넣었더니 400 INVALID_ARGUMENT 가 났다 → 넣지 않는다. */
-          generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
+          generationConfig: Object.assign(
+            { temperature: 0.1, maxOutputTokens: 1024 },
+            think ? { thinkingConfig: { thinkingLevel: think } } : {}
+          ),
         }) }
     );
     raw = await r.text();
@@ -98,10 +105,17 @@ async function callModel(prompt, model, allowFallback) {
 
   if (!r.ok) {
     /* 만료 안내에 후속 모델명이 들어 있다. 한 번만 그 모델로 다시 시도하고, 성공하면 그걸로 고정한다 */
+    /* 사고수준 옵션을 거부하면 옵션 없이 한 번 더 던지고, 이후로는 아예 안 쓴다 */
+    if (think && r.status === 400) {
+      console.log('[think] ' + think + ' 거부됨 → 옵션 없이 재시도');
+      const out = await callModel(prompt, model, allowFallback, null);
+      THINK = null;
+      return out;
+    }
     const m = raw.match(/use\s+models\/([A-Za-z0-9.\-]+)/);
     if (allowFallback && r.status === 404 && m && m[1] && m[1] !== model) {
       console.log('[model] ' + model + ' 만료 → ' + m[1] + ' 로 전환');
-      const out = await callModel(prompt, m[1], false);
+      const out = await callModel(prompt, m[1], false, think);
       ACTIVE = m[1];
       return out;
     }
@@ -121,7 +135,7 @@ async function callModel(prompt, model, allowFallback) {
 
 http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
-  if (req.url === '/health') return send(res, 200, { ok: true, model: ACTIVE, configured: MODEL, used, cap: CAP, month });
+  if (req.url === '/health') return send(res, 200, { ok: true, model: ACTIVE, configured: MODEL, think: THINK, used, cap: CAP, month });
   const isDiag = req.method === 'POST' && req.url === '/diag';
   if (!isDiag && !(req.method === 'POST' && req.url === '/ask')) return send(res, 404, { error: 'not found' });
 
@@ -147,8 +161,9 @@ http.createServer((req, res) => {
         catch (e) { return send(res, 200, { diag: 'fail', reason: String(e.message || e).slice(0, 400) }); }
       }
       used++;
+      const t0 = Date.now();
       const answer = await ask(q, cards, p.region);
-      send(res, 200, { answer, cards: cards.length, used, cap: CAP });
+      send(res, 200, { answer, cards: cards.length, used, cap: CAP, model: ACTIVE, ms: Date.now() - t0 });
     } catch (e) {
       send(res, 502, { error: String(e.message || e).slice(0, 300) });
     }
