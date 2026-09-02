@@ -93,9 +93,11 @@ async function callModel(prompt, model, allowFallback, think) {
           /* ⚠ 2026-09-02 실측 2건
              ① Gemini 3.x 는 '사고(thinking)' 토큰이 출력 한도를 먼저 먹는다.
                 500 으로 두었더니 답이 24자에서 잘렸다 → 2048 로 올린다.
+                속도 때문에 1024 로 내렸더니 이번엔 답 중간이 잘렸다(9/2 실측) → 2048 로 되돌린다.
+                속도는 thinkingLevel 로 잡는다. 한도로 잡지 않는다.
              ② thinkingConfig 를 넣었더니 400 INVALID_ARGUMENT 가 났다 → 넣지 않는다. */
           generationConfig: Object.assign(
-            { temperature: 0.1, maxOutputTokens: 1024 },
+            { temperature: 0.1, maxOutputTokens: 2048 },
             think ? { thinkingConfig: { thinkingLevel: think } } : {}
           ),
         }) }
