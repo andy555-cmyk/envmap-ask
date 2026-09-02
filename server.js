@@ -23,7 +23,10 @@ process.on('uncaughtException',  (e) => console.error('[uncaughtException]', e))
 
 const KEY    = process.env.GEMINI_API_KEY || '';
 const PASS   = process.env.ASK_PASS || '';
-const MODEL  = process.env.ASK_MODEL || 'gemini-2.0-flash';
+/* 모델은 예고 없이 만료된다(2026-09-02 실측: gemini-2.0-flash 404).
+   그때마다 사람이 환경변수를 고치게 하지 않는다 — 서버가 스스로 넘어간다. */
+const MODEL  = process.env.ASK_MODEL || 'gemini-3.6-flash';
+let ACTIVE = MODEL;                      // 실제로 동작하는 모델 (실행 중 갱신)
 const ORIGIN = process.env.ASK_ORIGIN || 'https://web-gijang-map-mrksc1tcf2e7efab.sel3.cloudtype.app';
 const CAP    = parseInt(process.env.ASK_MONTH_CAP || '3000', 10);
 const PORT   = process.env.PORT || 8080;
@@ -67,12 +70,16 @@ async function ask(q, cards, region) {
 
   const prompt = `${SYS}\n\n대상 지역: ${region || '(미지정)'}\n\n[근거 카드]\n${ctx || '(없음)'}\n\n[질문]\n${q}`;
 
+  return callModel(prompt, ACTIVE, true);
+}
+
+async function callModel(prompt, model, allowFallback) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 25000);
   let r, raw;
   try {
     r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       { method: 'POST', signal: ac.signal,
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': KEY },
         body: JSON.stringify({
@@ -85,7 +92,17 @@ async function ask(q, cards, region) {
     throw new Error('upstream 연결 실패: ' + String(e && e.message || e).slice(0, 160));
   } finally { clearTimeout(timer); }
 
-  if (!r.ok) throw new Error('gemini ' + r.status + ' — ' + raw.replace(/\s+/g, ' ').slice(0, 240));
+  if (!r.ok) {
+    /* 만료 안내에 후속 모델명이 들어 있다. 한 번만 그 모델로 다시 시도하고, 성공하면 그걸로 고정한다 */
+    const m = raw.match(/use\s+models\/([A-Za-z0-9.\-]+)/);
+    if (allowFallback && r.status === 404 && m && m[1] && m[1] !== model) {
+      console.log('[model] ' + model + ' 만료 → ' + m[1] + ' 로 전환');
+      const out = await callModel(prompt, m[1], false);
+      ACTIVE = m[1];
+      return out;
+    }
+    throw new Error('gemini ' + r.status + ' — ' + raw.replace(/\s+/g, ' ').slice(0, 240));
+  }
   let j; try { j = JSON.parse(raw); } catch (e) { throw new Error('gemini 응답 파싱 실패: ' + raw.slice(0, 200)); }
   const t = j && j.candidates && j.candidates[0] && j.candidates[0].content
             && j.candidates[0].content.parts && j.candidates[0].content.parts[0]
@@ -95,7 +112,7 @@ async function ask(q, cards, region) {
 
 http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
-  if (req.url === '/health') return send(res, 200, { ok: true, model: MODEL, used, cap: CAP, month });
+  if (req.url === '/health') return send(res, 200, { ok: true, model: ACTIVE, configured: MODEL, used, cap: CAP, month });
   const isDiag = req.method === 'POST' && req.url === '/diag';
   if (!isDiag && !(req.method === 'POST' && req.url === '/ask')) return send(res, 404, { error: 'not found' });
 
@@ -127,4 +144,4 @@ http.createServer((req, res) => {
       send(res, 502, { error: String(e.message || e).slice(0, 300) });
     }
   });
-}).listen(PORT, () => console.log('ask proxy on', PORT, 'model', MODEL));
+}).listen(PORT, () => console.log('ask proxy on', PORT, 'model', ACTIVE));
