@@ -84,7 +84,13 @@ async function callModel(prompt, model, allowFallback) {
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': KEY },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 500 },
+          generationConfig: {
+            temperature: 0.1,
+            /* ⚠ 2026-09-02 실측 — Gemini 3.x 는 '사고(thinking)' 토큰이 출력 한도를 먼저 먹는다.
+               500 으로 두었더니 답이 24자에서 잘렸다. 한도를 넉넉히 주고 사고를 끈다. */
+            maxOutputTokens: 2048,
+            thinkingConfig: { thinkingBudget: 0 },
+          },
         }) }
     );
     raw = await r.text();
@@ -104,10 +110,15 @@ async function callModel(prompt, model, allowFallback) {
     throw new Error('gemini ' + r.status + ' — ' + raw.replace(/\s+/g, ' ').slice(0, 240));
   }
   let j; try { j = JSON.parse(raw); } catch (e) { throw new Error('gemini 응답 파싱 실패: ' + raw.slice(0, 200)); }
-  const t = j && j.candidates && j.candidates[0] && j.candidates[0].content
-            && j.candidates[0].content.parts && j.candidates[0].content.parts[0]
-            && j.candidates[0].content.parts[0].text;
-  return (t || '').trim();
+  const c = j && j.candidates && j.candidates[0];
+  const parts = c && c.content && c.content.parts;
+  const t = (parts || []).map((p) => p && p.text).filter(Boolean).join('');
+  if (!t) {
+    /* 왜 비었는지 알려준다 — 안전필터·토큰한도 등 */
+    throw new Error('응답 없음 (finishReason=' + ((c && c.finishReason) || '?') + ')');
+  }
+  if (c && c.finishReason === 'MAX_TOKENS') return t.trim() + ' …(길이 제한으로 잘림)';
+  return t.trim();
 }
 
 http.createServer((req, res) => {
