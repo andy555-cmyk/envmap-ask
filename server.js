@@ -13,6 +13,10 @@
  *   ASK_MODEL        기본 gemini-2.0-flash
  *   ASK_ORIGIN       허용 오리진 (기본: 라이브 주소)
  *   ASK_MONTH_CAP    월 최대 호출 수 (기본 3000)
+ *
+ * 부산 교통 실시간 중계 (/traffic, 2026-10-05~)
+ *   DATA_GO_KR_KEY   공공데이터포털 인증키 — 없으면 /traffic 만 503, 질문 답변은 그대로
+ *   TRAFFIC_DAY_CAP  경로별 하루 최대 호출 수 (기본 450 · 개발계정 500건/일)
  */
 const http = require('http');
 
@@ -33,6 +37,71 @@ const PORT   = process.env.PORT || 8080;
 
 let month = new Date().toISOString().slice(0, 7);
 let used = 0;
+
+/* ── 부산 교통 실시간 중계 ──
+   busan-traffic.html 이 data.go.kr 키를 페이지에 직접 넣어 공개 저장소·공개 페이지에 노출됐다(2026-10-05 확인).
+   키는 이 서버 환경변수에만 두고, 페이지는 여기를 거쳐 부른다.
+   · 허용한 경로 5개만 중계한다 — 아무 API 나 대신 불러 주는 열린 중계가 되지 않게
+   · 같은 요청은 4분간 저장본으로 답한다 — 여러 사람이 켜도 원 API 호출은 한 번
+   · 개발계정 하루 500건 → 경로별 하루 TCAP 에서 멈춘다(한국 시각 자정 초기화)
+   · 응답·로그에 키가 섞여 나가지 않게, 원 API 주소는 어디에도 남기지 않는다 */
+const TKEY   = (process.env.DATA_GO_KR_KEY || '').trim();
+const TCAP   = parseInt(process.env.TRAFFIC_DAY_CAP || '450', 10);
+const TTTL   = 240000;
+const TPATHS = new Set([
+  'BusanITSEXL/EXLTraffic', 'BusanITSDSRC/DSRCSectSpd', 'BusanITSAVISect/AVISectSpd',
+  'BusanITSAVI/AVIList', 'BusanITSSECT/SECTSpd',
+]);
+const kstDay = () => new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);
+let tday = kstDay();
+let tused = {};
+const tcache = new Map();
+
+async function traffic(path, pageNo, rows) {
+  const ck = `${path}|${pageNo}|${rows}`;
+  const hit = tcache.get(ck);
+  if (hit && Date.now() - hit.t < TTTL) return { body: hit.body, cached: true };
+
+  const d = kstDay();
+  if (d !== tday) { tday = d; tused = {}; }
+  if ((tused[path] || 0) >= TCAP) { const e = new Error(`오늘 호출 한도(${TCAP}회)를 다 썼습니다`); e.code = 429; throw e; }
+  tused[path] = (tused[path] || 0) + 1;
+
+  /* 포털 키는 Encoding(%2B…)·Decoding(+/=) 두 벌이다. 어느 쪽을 넣어도 되게 한다 */
+  const k = /%[0-9A-Fa-f]{2}/.test(TKEY) ? TKEY : encodeURIComponent(TKEY);
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 20000);
+  let r, raw;
+  try {
+    r = await fetch(`https://apis.data.go.kr/6260000/${path}?serviceKey=${k}&pageNo=${pageNo}&numOfRows=${rows}&resultType=json`,
+      { signal: ac.signal });
+    raw = await r.text();
+  } catch (e) {
+    const x = new Error('교통 API 연결 실패'); x.code = 502; throw x;
+  } finally { clearTimeout(timer); }
+
+  /* 키 오류 등은 JSON 이 아니라 XML 로 온다. 사유 코드만 꺼내 돌려준다 */
+  if (!r.ok || raw.trimStart()[0] !== '{') {
+    const m = raw.match(/<returnAuthMsg>([^<]+)</) || raw.match(/<resultMsg>([^<]+)</);
+    const x = new Error('교통 API ' + r.status + (m ? ' — ' + m[1] : '')); x.code = 502; throw x;
+  }
+  /* JSON 이어도 오류일 수 있다(numOfRows=200 → 100 INVALID_REQUEST_PARAMETER_ERROR, 10/5 실측). 저장하지 않는다 */
+  const rc = raw.slice(0, 300).match(/"resultCode"\s*:\s*"(\d+)"[^}]*?"resultMsg"\s*:\s*"([^"]*)"/);
+  if (rc && rc[1] !== '00') { const x = new Error('교통 API ' + rc[1] + ' — ' + rc[2]); x.code = 502; throw x; }
+  tcache.set(ck, { t: Date.now(), body: raw });
+  if (tcache.size > 300) for (const [kk, v] of tcache) if (Date.now() - v.t >= TTTL) tcache.delete(kk);
+  return { body: raw, cached: false };
+}
+
+function sendRaw(res, code, body, cached) {
+  res.writeHead(code, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': ORIGIN,
+    'Cache-Control': 'no-store',
+    'X-Cache': cached ? 'HIT' : 'MISS',
+  });
+  res.end(body);
+}
 
 const SYS = [
   '너는 도시재생 현황분석 지도의 현장 답변 보조다.',
@@ -60,7 +129,7 @@ function send(res, code, obj) {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': ORIGIN,
     'Access-Control-Allow-Headers': 'content-type,x-ask-pass',
-    'Access-Control-Allow-Methods': 'POST,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
     'Cache-Control': 'no-store',
   });
   res.end(JSON.stringify(obj));
@@ -143,6 +212,27 @@ async function callModel(prompt, model, allowFallback, think) {
 http.createServer((req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   if (req.url === '/health') return send(res, 200, { ok: true, model: ACTIVE, configured: MODEL, think: THINK, used, cap: CAP, month });
+
+  if (req.method === 'GET' && req.url.startsWith('/traffic')) {
+    const u = new URL(req.url, 'http://x');
+    if (kstDay() !== tday) { tday = kstDay(); tused = {}; }
+    if (u.pathname === '/traffic/health')
+      return send(res, 200, { ok: true, configured: !!TKEY, used: tused, cap: TCAP, day: tday });
+    if (u.pathname !== '/traffic') return send(res, 404, { error: 'not found' });
+    /* 브라우저는 다른 사이트에서 부를 때 Origin 을 붙인다. 응답을 못 읽어도 호출은 나가 한도를 먹으므로 서버에서 막는다 */
+    if (req.headers.origin !== ORIGIN) return send(res, 403, { error: '허용되지 않은 출처' });
+    if (!TKEY) return send(res, 503, { error: 'DATA_GO_KR_KEY 미설정' });
+    const path = u.searchParams.get('path') || '';
+    const pageNo = parseInt(u.searchParams.get('pageNo') || '1', 10);
+    const rows = parseInt(u.searchParams.get('numOfRows') || '100', 10);
+    /* 원 API 는 한 번에 100건까지만 받는다(200 은 오류, 10/5 실측) */
+    if (!TPATHS.has(path) || !(pageNo >= 1 && pageNo <= 50) || rows !== 100)
+      return send(res, 400, { error: '허용되지 않은 요청' });
+    traffic(path, pageNo, rows)
+      .then((o) => sendRaw(res, 200, o.body, o.cached))
+      .catch((e) => send(res, e.code || 502, { error: String(e.message || e).slice(0, 200) }));
+    return;
+  }
   const isDiag = req.method === 'POST' && req.url === '/diag';
   if (!isDiag && !(req.method === 'POST' && req.url === '/ask')) return send(res, 404, { error: 'not found' });
 
