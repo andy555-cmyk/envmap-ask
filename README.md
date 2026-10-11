@@ -15,6 +15,10 @@
 - 주소 **https://port-0-envmap-ask-mrksc1tcf2e7efab.sel3.cloudtype.app**
 - 상태 확인 `curl <주소>/health` → `{"ok":true,"model":"gemini-2.0-flash",...}`
 - ⚠ **환경변수 `GEMINI_API_KEY`·`ASK_PASS` 가 아직 비어 있다.** 대표가 채워야 동작한다
+- **2026-10-11 — 교통 실시간 중계 `/traffic` 은 늘 켜져 있는 환경분석맵 서버 envmap-engine 으로 옮겼다**
+  (`envmap-engine/engine/api/api_traffic.py`, 규칙 동일). 이 서버는 Cloudtype 무료 칸이라 매일 1회 멈춘다.
+  교통망 페이지(`gijang-map/busan-traffic.html`)는 더 이상 여기를 부르지 않는다 — 여기 `/traffic` 은 예비로만 남는다.
+  이 서버에 남은 기능은 질문 답변(`/ask`)뿐이다.
 
 ## 왜 프록시인가
 
